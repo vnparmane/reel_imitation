@@ -1,23 +1,22 @@
 from __future__ import annotations
 
+import warnings
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
 
 class ReelOCR:
-    """CPU-bound ONNX OCR extractor for in-video overlay text and subtitles."""
-
     def __init__(self, max_height: int = 480) -> None:
         self.max_height = max_height
         try:
             from rapidocr_onnxruntime import RapidOCR  # type: ignore[import-untyped]
             self._engine = RapidOCR()
-        except Exception:
+        except Exception as exc:
+            warnings.warn(f"RapidOCR initialization failed ({exc}); OCR will return empty strings.", RuntimeWarning)
             self._engine = None
 
     def extract_text(self, frame_rgb: NDArray[np.uint8]) -> str:
-        """Downscales frame if needed and extracts visible overlay text strings."""
         if self._engine is None or frame_rgb.size == 0:
             return ""
 
@@ -29,10 +28,10 @@ class ReelOCR:
         else:
             resized = frame_rgb
 
-        result, _ = self._engine(resized)
+        frame_bgr = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
+        result, _ = self._engine(frame_bgr)
         if not result:
             return ""
 
-        # RapidOCR returns list of [bbox, text, confidence]
         lines = [str(item[1]).strip() for item in result if float(item[2]) >= 0.5]
         return " | ".join(lines)

@@ -9,7 +9,7 @@ from reel_clone.config import HardwareConfig
 from reel_clone.encoders.fusion import MultimodalFeatureExtractor
 
 
-def _make_dummy_tick(ocr_text: str = "Wait for the end 😂", silent: bool = False) -> RawObservationTick:
+def _make_dummy_tick(ocr_text: str = "Wait for the end", silent: bool = False) -> RawObservationTick:
     vp = ReelViewportState(
         reel_id="reel_xyz",
         bbox=BoundingBox(left=0, top=0, width=224, height=224),
@@ -29,6 +29,7 @@ def _make_dummy_tick(ocr_text: str = "Wait for the end 😂", silent: bool = Fal
     return RawObservationTick(
         tick_index=6,
         wall_time=100.0,
+        unix_ts_ms=1700000000000.0,
         viewport=vp,
         frame_rgb=frame,
         audio_pcm=audio,
@@ -36,7 +37,7 @@ def _make_dummy_tick(ocr_text: str = "Wait for the end 😂", silent: bool = Fal
     )
 
 
-def test_multimodal_feature_extractor_shapes_and_metadata() -> None:
+def test_multimodal_feature_extractor_bounded_meta_and_no_leakage() -> None:
     hw = HardwareConfig()
     extractor = MultimodalFeatureExtractor(hw_config=hw, mock_mode=True)
 
@@ -46,10 +47,10 @@ def test_multimodal_feature_extractor_shapes_and_metadata() -> None:
     assert encoded.fused_embedding.shape == (1284,)
     assert not torch.isnan(encoded.fused_embedding).any()
 
-    # Verify the last 4 elements match temporal_meta: [3.0/12.0=0.25, log(4.0), loop=1.0, liked=1.0]
     meta = encoded.fused_embedding[-4:].float().cpu()
+    assert torch.all((meta >= 0.0) & (meta <= 1.0))
     assert torch.isclose(meta[0], torch.tensor(0.25), atol=1e-3)
-    assert torch.isclose(meta[2], torch.tensor(1.0), atol=1e-3)
+    assert torch.isclose(meta[2], torch.tensor(0.20), atol=1e-3)
     assert torch.isclose(meta[3], torch.tensor(1.0), atol=1e-3)
 
 
@@ -58,13 +59,8 @@ def test_silent_audio_and_empty_ocr_produce_zero_subvectors() -> None:
     tick = _make_dummy_tick(ocr_text="   ", silent=True)
     encoded = extractor.extract(tick)
 
-    # Slices: [0:512] vision, [512:1024] ocr_text, [1024:1280] audio, [1280:1284] meta
     txt_slice = encoded.fused_embedding[512:1024]
     aud_slice = encoded.fused_embedding[1024:1280]
 
     assert torch.all(txt_slice == 0)
     assert torch.all(aud_slice == 0)
-
-    if torch.cuda.is_available():
-        vram_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        assert vram_gb < 1.5

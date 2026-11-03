@@ -6,11 +6,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS reels (
-    reel_id TEXT PRIMARY KEY,
-    session_id TEXT,
+    trajectory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reel_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     duration_sec REAL,
     watch_time_sec REAL,
-    final_action INTEGER, -- 0: CONTINUE, 1: SKIP, 2: LIKE
-    loop_count INTEGER,
+    final_action INTEGER,
+    liked INTEGER DEFAULT 0,
+    censored INTEGER DEFAULT 0,
+    loop_count INTEGER DEFAULT 0,
+    npz_filename TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_reels_session ON reels(session_id);
+CREATE INDEX IF NOT EXISTS idx_reels_reel_id ON reels(reel_id);

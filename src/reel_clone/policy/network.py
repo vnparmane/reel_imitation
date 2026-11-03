@@ -1,4 +1,3 @@
-﻿# src/reel_clone/policy/network.py
 from __future__ import annotations
 
 import torch
@@ -10,31 +9,30 @@ from reel_clone.encoders.fusion import MultimodalFeatureExtractor
 
 
 class TemporalBehaviorPolicy(nn.Module):
-    """
-    Two-Head Causal GRU Policy:
-      - Head 0 (skip_hazard_logit): instantaneous hazard h_t = P(skip at t | survived to t)
-      - Head 1 (like_logit): instantaneous probability l_t = P(like at t)
-    """
-
     NUM_HEADS: int = 2  # [skip_hazard_logit, like_logit]
 
     def __init__(
         self,
         input_dim: int = MultimodalFeatureExtractor.FUSED_DIM,
-        hidden_dim: int = 256,
-        num_layers: int = 2,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
         hw_config: HardwareConfig | None = None,
     ) -> None:
         super().__init__()
         self.hw = hw_config or HardwareConfig()
         self.device = torch.device(self.hw.device)
 
+        self.input_norm = nn.LayerNorm(input_dim)
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
         self.gru = nn.GRU(
-            input_size=input_dim,
+            input_size=hidden_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            dropout=0.1 if num_layers > 1 else 0.0,
         )
         self.head = nn.Linear(hidden_dim, self.NUM_HEADS)
         self.to(self.device)
@@ -47,6 +45,7 @@ class TemporalBehaviorPolicy(nn.Module):
         return_sequence: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = seq_features.to(device=self.device, dtype=self.head.weight.dtype)
+        x = self.input_proj(self.input_norm(x))
 
         if lengths is not None:
             packed = pack_padded_sequence(

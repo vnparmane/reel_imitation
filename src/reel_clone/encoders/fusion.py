@@ -13,24 +13,21 @@ from reel_clone.encoders.vision import VisionTextEncoder
 
 @dataclass(frozen=True)
 class EncodedTick:
-    """Fused multimodal feature representation for a single 0.5s tick."""
     tick_index: int
     reel_id: str
     elapsed_sec: float
     duration_sec: float
     loop_count: int
     is_liked: bool
-    fused_embedding: torch.Tensor   # Shape: (1284,), dtype: float16/float32
+    is_paused: bool
+    wall_time: float
+    unix_ts_ms: float
+    fused_embedding: torch.Tensor
     latency_ms: float
 
 
 class MultimodalFeatureExtractor:
-    """
-    Coordinates frozen Vision, OCR Text, Audio, and Temporal Progress features
-    into a single 1284-d state representation per tick.
-    """
-
-    FUSED_DIM: int = VisionTextEncoder.EMBED_DIM * 2 + AudioEncoder.EMBED_DIM + 4  # 512 + 512 + 256 + 4 = 1284
+    FUSED_DIM: int = VisionTextEncoder.EMBED_DIM * 2 + AudioEncoder.EMBED_DIM + 4  # 1284
 
     def __init__(
         self,
@@ -47,24 +44,25 @@ class MultimodalFeatureExtractor:
 
     @torch.inference_mode()
     def extract(self, raw_tick: RawObservationTick) -> EncodedTick:
-        """Extracts and fuses all modalities for a single RawObservationTick."""
         t0 = time.perf_counter()
 
-        vis_emb = self.vision.encode_frame(raw_tick.frame_rgb)          # (512,)
-        txt_emb = self.vision.encode_ocr_text(raw_tick.ocr_text)        # (512,)
-        aud_emb = self.audio.encode_audio(raw_tick.audio_pcm)           # (256,)
+        vis_emb = self.vision.encode_frame(raw_tick.frame_rgb)
+        txt_emb = self.vision.encode_ocr_text(raw_tick.ocr_text)
+        aud_emb = self.audio.encode_audio(raw_tick.audio_pcm)
 
         vp = raw_tick.viewport
         safe_dur = max(vp.duration_sec, 1.0)
-        progress_ratio = min(vp.current_time_sec / safe_dur, 5.0)
-        log_elapsed = math.log1p(max(0.0, vp.current_time_sec))
+        progress_ratio = min(max(vp.current_time_sec / safe_dur, 0.0), 1.0)
+        scaled_log_elapsed = min(math.log1p(max(0.0, vp.current_time_sec)) / math.log1p(60.0), 1.0)
+        scaled_loops = min(float(vp.loop_count) / 5.0, 1.0)
+        is_replaying = 1.0 if vp.loop_count > 0 else 0.0
 
         temporal_meta = torch.tensor(
             [
                 progress_ratio,
-                log_elapsed,
-                float(vp.loop_count),
-                1.0 if vp.is_liked else 0.0,
+                scaled_log_elapsed,
+                scaled_loops,
+                is_replaying,
             ],
             device=self.device,
             dtype=self.dtype,
@@ -80,6 +78,9 @@ class MultimodalFeatureExtractor:
             duration_sec=vp.duration_sec,
             loop_count=vp.loop_count,
             is_liked=vp.is_liked,
+            is_paused=vp.is_paused,
+            wall_time=raw_tick.wall_time,
+            unix_ts_ms=raw_tick.unix_ts_ms,
             fused_embedding=fused,
             latency_ms=latency_ms,
         )

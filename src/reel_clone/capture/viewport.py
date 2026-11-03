@@ -1,16 +1,31 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
-from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
+import cv2
+import numpy as np
+from numpy.typing import NDArray
+from playwright.async_api import Error as PlaywrightError, async_playwright, BrowserContext, Page, Playwright
 
 from reel_clone.config import CaptureConfig
 
 
+def sanitize_reel_id(raw_id: str) -> str:
+    """Converts shortcodes or blob URLs into collision-free, Windows-safe identifiers."""
+    clean = raw_id.strip()
+    if not clean or clean == "unknown_reel":
+        return "unknown_reel"
+    if re.fullmatch(r"[A-Za-z0-9_-]{5,32}", clean):
+        return clean
+    digest = hashlib.sha1(clean.encode("utf-8")).hexdigest()[:12]
+    tail = re.sub(r"[^A-Za-z0-9]", "", clean[-12:])[:8]
+    return f"reel_{tail}_{digest}"
+
+
 @dataclass(frozen=True)
 class BoundingBox:
-    """Screen-relative or viewport-relative pixel coordinates for mss capture."""
     left: int
     top: int
     width: int
@@ -24,10 +39,17 @@ class BoundingBox:
             "height": self.height,
         }
 
+    def to_playwright_clip(self) -> dict[str, float]:
+        return {
+            "x": float(max(0, self.left)),
+            "y": float(max(0, self.top)),
+            "width": float(max(1, self.width)),
+            "height": float(max(1, self.height)),
+        }
+
 
 @dataclass(frozen=True)
 class ReelViewportState:
-    """Snapshot of the currently active Reel at tick t."""
     reel_id: str
     bbox: BoundingBox
     current_time_sec: float
@@ -38,8 +60,6 @@ class ReelViewportState:
 
 
 class ReelViewportController:
-    """Manages the Instagram Reels browser session and detects reel boundaries & state."""
-
     def __init__(self, config: CaptureConfig | None = None) -> None:
         self.config = config or CaptureConfig()
         self._playwright: Playwright | None = None
@@ -65,10 +85,7 @@ class ReelViewportController:
                 "width": self.config.viewport_width,
                 "height": self.config.viewport_height,
             },
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--autoplay-policy=no-user-gesture-required",
-            ],
+            args=["--autoplay-policy=no-user-gesture-required"],
         )
         self._page = (
             self._context.pages[0]
@@ -85,55 +102,101 @@ class ReelViewportController:
             await self._playwright.stop()
             self._playwright = None
 
+    async def capture_reel_rgb(self, bbox: BoundingBox) -> NDArray[np.uint8]:
+        try:
+            jpeg_bytes = await self.page.screenshot(
+                clip=bbox.to_playwright_clip(),
+                type="jpeg",
+                quality=85,
+            )
+            arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is not None:
+                return np.ascontiguousarray(bgr[:, :, ::-1])
+        except PlaywrightError:
+            pass
+        return np.zeros((max(1, bbox.height), max(1, bbox.width), 3), dtype=np.uint8)
+
     async def inspect_active_reel(self) -> ReelViewportState | None:
-        raw: dict[str, Any] | None = await self.page.evaluate(
-            """() => {
-                const videos = Array.from(document.querySelectorAll("video"));
-                if (videos.length === 0) return null;
+        try:
+            raw: dict[str, Any] | None = await self.page.evaluate(
+                """() => {
+                    const videos = Array.from(document.querySelectorAll('video'));
+                    if (videos.length === 0) return null;
 
-                const centerY = window.innerHeight / 2;
-                let bestVideo = null;
-                let bestDist = Infinity;
+                    const centerY = window.innerHeight / 2;
+                    let bestVideo = null;
+                    let bestDist = Infinity;
 
-                for (const v of videos) {
-                    const rect = v.getBoundingClientRect();
-                    if (rect.height < 150 || rect.width < 100) continue;
-                    const vCenterY = rect.top + rect.height / 2;
-                    const dist = Math.abs(vCenterY - centerY);
-                    if (dist < bestDist) {
-                        bestDist = dist;
-                        bestVideo = { video: v, rect };
+                    for (const v of videos) {
+                        const rect = v.getBoundingClientRect();
+                        if (rect.height < 150 || rect.width < 100) continue;
+                        const vCenterY = rect.top + rect.height / 2;
+                        const dist = Math.abs(vCenterY - centerY);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestVideo = { video: v, rect, dist };
+                        }
                     }
-                }
 
-                if (!bestVideo) return null;
-                const { video, rect } = bestVideo;
+                    if (!bestVideo || bestVideo.dist > window.innerHeight * 0.35) return null;
+                    const { video, rect } = bestVideo;
 
-                const pathParts = window.location.pathname.split("/").filter(Boolean);
-                const urlId = (pathParts[0] === "reels" && pathParts[1]) ? pathParts[1] : null;
-                const reelId = urlId || video.currentSrc || "unknown_reel";
+                    let container = video.parentElement;
+                    for (let i = 0; i < 6 && container && container.parentElement; i++) {
+                        if (container.querySelector('svg[aria-label="Like"], svg[aria-label="Unlike"], svg[fill="#ff3040"], svg[fill="rgb(255, 48, 64)"]')) {
+                            break;
+                        }
+                        container = container.parentElement;
+                    }
+                    const scope = container || video.parentElement || document;
 
-                const unlikeSvg = document.querySelector("svg[aria-label=\\"Unlike\\"]");
-                const isLiked = Boolean(unlikeSvg);
+                    if (!video.dataset.reelCloneId) {
+                        let candidateId = video.getAttribute('data-reel-id');
+                        if (!candidateId) {
+                            const link = scope.querySelector('a[href*="/reel/"], a[href*="/reels/"]');
+                            if (link && link.getAttribute('href')) {
+                                const parts = link.getAttribute('href').split('/').filter(Boolean);
+                                if (parts.length >= 2) candidateId = parts[1];
+                            }
+                        }
+                        if (!candidateId) {
+                            const pathParts = window.location.pathname.split('/').filter(Boolean);
+                            if ((pathParts[0] === 'reels' || pathParts[0] === 'reel') && pathParts[1]) {
+                                candidateId = pathParts[1];
+                            }
+                        }
+                        if (!candidateId) {
+                            window.__reel_seq = (window.__reel_seq || 0) + 1;
+                            candidateId = (video.currentSrc || 'reel') + '_' + window.__reel_seq;
+                        }
+                        video.dataset.reelCloneId = String(candidateId);
+                    }
 
-                return {
-                    reelId: reelId,
-                    left: Math.max(0, Math.round(rect.left)),
-                    top: Math.max(0, Math.round(rect.top)),
-                    width: Math.round(rect.width),
-                    height: Math.round(rect.height),
-                    currentTime: Number(video.currentTime || 0),
-                    duration: Number(video.duration || 0),
-                    paused: Boolean(video.paused),
-                    isLiked: isLiked
-                };
-            }"""
-        )
+                    const reelId = video.dataset.reelCloneId;
+                    const unlikeSvg = scope.querySelector('svg[aria-label="Unlike"], svg[fill="#ff3040"], svg[fill="rgb(255, 48, 64)"]');
+                    const isLiked = Boolean(unlikeSvg);
+
+                    return {
+                        reelId: String(reelId),
+                        left: Math.max(0, Math.round(rect.left)),
+                        top: Math.max(0, Math.round(rect.top)),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        currentTime: Number(video.currentTime || 0),
+                        duration: Number(video.duration || 0),
+                        paused: Boolean(video.paused),
+                        isLiked: isLiked
+                    };
+                }"""
+            )
+        except PlaywrightError:
+            return None
 
         if raw is None or raw["width"] <= 0 or raw["height"] <= 0:
             return None
 
-        reel_id = str(raw["reelId"])
+        reel_id = sanitize_reel_id(str(raw["reelId"]))
         current_time = float(raw["currentTime"])
         duration = float(raw["duration"])
 
@@ -142,7 +205,11 @@ class ReelViewportController:
             self._loop_count = 0
             self._last_playback_time = current_time
         else:
-            if duration > 1.0 and (self._last_playback_time - current_time) > (duration * 0.5):
+            if (
+                duration > 1.0
+                and self._last_playback_time >= duration * 0.80
+                and current_time <= duration * 0.25
+            ):
                 self._loop_count += 1
             self._last_playback_time = current_time
 
@@ -160,4 +227,3 @@ class ReelViewportController:
             loop_count=self._loop_count,
             is_liked=bool(raw["isLiked"]),
         )
-
