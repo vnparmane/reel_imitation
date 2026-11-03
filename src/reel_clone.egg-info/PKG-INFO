@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: reel-clone
+Version: 0.1.0
+Summary: Personalized Short-Form Video Behavior Cloning Agent for Instagram Reels
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: torch>=2.4.0
+Requires-Dist: torchaudio>=2.4.0
+Requires-Dist: open-clip-torch>=2.26.1
+Requires-Dist: transformers>=4.44.0
+Requires-Dist: playwright>=1.47.0
+Requires-Dist: mss>=9.0.1
+Requires-Dist: rapidocr-onnxruntime>=1.3.24
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: pydantic>=2.9.0
+Provides-Extra: windows-audio
+Requires-Dist: PyAudioWPatch>=0.2.12.6; extra == "windows-audio"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
+Requires-Dist: ruff>=0.6.0; extra == "dev"
+Requires-Dist: mypy>=1.11.0; extra == "dev"
